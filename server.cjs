@@ -23,7 +23,6 @@ if (!POST_TOKEN || !VIEW_USER || !VIEW_PASSWORD) {
 fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
 app.disable('x-powered-by');
-app.use(express.json({ limit: '32kb' }));
 
 function basicAuth(req, res, next) {
   const header = req.headers.authorization || '';
@@ -52,8 +51,11 @@ function basicAuth(req, res, next) {
   next();
 }
 
-function validBearer(req) {
-  return req.headers.authorization === `Bearer ${POST_TOKEN}`;
+function requireBearer(req, res, next) {
+  if (req.headers.authorization !== `Bearer ${POST_TOKEN}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
 }
 
 const upload = multer({
@@ -62,7 +64,8 @@ const upload = multer({
     filename: (req, file, cb) => {
       const ext = path.extname(file.originalname || '').toLowerCase() ||
         (file.mimetype === 'image/jpeg' ? '.jpg' :
-         file.mimetype === 'image/heic' ? '.heic' : '.png');
+         file.mimetype === 'image/heic' ? '.heic' :
+         file.mimetype === 'image/webp' ? '.webp' : '.png');
       cb(null, `${Date.now()}-${crypto.randomUUID()}${ext}`);
     }
   }),
@@ -82,16 +85,93 @@ function parseIncoming(req, res, next) {
       next();
     });
   }
-  next();
-}
 
-app.post('/findme/', parseIncoming, async (req, res) => {
-  if (!validBearer(req)) {
-    if (req.file) fs.promises.unlink(req.file.path).catch(() => {});
-    return res.status(401).json({ error: 'Unauthorized' });
+  if (req.is('application/json')) {
+    return express.json({ limit: '16mb' })(req, res, next);
   }
 
-  const { latitude, longitude, timestamp, battery } = req.body || {};
+  return res.status(415).json({
+    error: 'Content-Type must be application/json or multipart/form-data'
+  });
+}
+
+function imageExtension(buffer, declaredMime) {
+  if (
+    buffer.length >= 8 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47
+  ) return '.png';
+
+  if (
+    buffer.length >= 3 &&
+    buffer[0] === 0xff &&
+    buffer[1] === 0xd8 &&
+    buffer[2] === 0xff
+  ) return '.jpg';
+
+  if (
+    buffer.length >= 12 &&
+    buffer.toString('ascii', 0, 4) === 'RIFF' &&
+    buffer.toString('ascii', 8, 12) === 'WEBP'
+  ) return '.webp';
+
+  if (
+    buffer.length >= 12 &&
+    buffer.toString('ascii', 4, 8) === 'ftyp'
+  ) return '.heic';
+
+  if (declaredMime === 'image/png') return '.png';
+  if (declaredMime === 'image/jpeg') return '.jpg';
+  if (declaredMime === 'image/webp') return '.webp';
+  if (declaredMime === 'image/heic' || declaredMime === 'image/heif') return '.heic';
+
+  return null;
+}
+
+async function saveBase64Screenshot(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') throw new Error('screenshot must be Base64 text');
+
+  let base64 = value.trim();
+  let declaredMime = null;
+
+  const dataUrl = base64.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.*)$/s);
+  if (dataUrl) {
+    declaredMime = dataUrl[1].toLowerCase();
+    base64 = dataUrl[2];
+  }
+
+  base64 = base64.replace(/\s+/g, '');
+  if (!base64) return null;
+
+  const buffer = Buffer.from(base64, 'base64');
+
+  if (!buffer.length) throw new Error('screenshot contains invalid Base64 data');
+  if (buffer.length > 12 * 1024 * 1024) throw new Error('screenshot exceeds 12 MB');
+
+  const ext = imageExtension(buffer, declaredMime);
+  if (!ext) throw new Error('screenshot is not a supported image');
+
+  const filename = `${Date.now()}-${crypto.randomUUID()}${ext}`;
+  await fs.promises.writeFile(path.join(SCREENSHOT_DIR, filename), buffer);
+
+  return {
+    filename,
+    url: `/findme/screenshots/${filename}`
+  };
+}
+
+app.post('/findme/', requireBearer, parseIncoming, async (req, res) => {
+  const body = req.body || {};
+
+  // Accept both the concise iOS Shortcut field names and the longer API names.
+  const latitude = body.lat ?? body.latitude;
+  const longitude = body.lon ?? body.longitude;
+  const timestamp = body.time ?? body.timestamp;
+  const battery = body.bat ?? body.battery;
+
   const lat = Number(latitude);
   const lon = Number(longitude);
   const batt =
@@ -119,22 +199,42 @@ app.post('/findme/', parseIncoming, async (req, res) => {
     return res.status(400).json({ error: 'Invalid battery level' });
   }
 
-  const point = {
-    latitude: lat,
-    longitude: lon,
-    timestamp: timestamp || null,
-    battery: batt,
-    screenshot: req.file ? `/findme/screenshots/${req.file.filename}` : null,
-    receivedAt: new Date().toISOString()
-  };
+  let screenshot = req.file
+    ? {
+        filename: req.file.filename,
+        url: `/findme/screenshots/${req.file.filename}`
+      }
+    : null;
 
   try {
+    // For JSON posts, Shortcuts sends the screenshot as Base64 text.
+    if (!screenshot && body.screenshot) {
+      screenshot = await saveBase64Screenshot(body.screenshot);
+    }
+
+    const point = {
+      latitude: lat,
+      longitude: lon,
+      timestamp: timestamp || null,
+      battery: batt,
+      screenshot: screenshot ? screenshot.url : null,
+      receivedAt: new Date().toISOString()
+    };
+
     await fs.promises.appendFile(DATA_FILE, JSON.stringify(point) + '\n');
-    res.json({ ok: true, screenshot: Boolean(req.file) });
+
+    res.json({
+      ok: true,
+      screenshot: Boolean(screenshot)
+    });
   } catch (err) {
     if (req.file) fs.promises.unlink(req.file.path).catch(() => {});
+    if (screenshot && !req.file) {
+      fs.promises.unlink(path.join(SCREENSHOT_DIR, screenshot.filename)).catch(() => {});
+    }
+
     console.error(err);
-    res.status(500).json({ error: 'Unable to save location' });
+    res.status(400).json({ error: err.message || 'Unable to save location' });
   }
 });
 
