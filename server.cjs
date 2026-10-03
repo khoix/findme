@@ -17,6 +17,7 @@ const DATA_DIR = path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'locations.jsonl');
 const REQUEST_LOG_FILE = path.join(DATA_DIR, 'requests.jsonl');
 const SCREENSHOT_DIR = path.join(DATA_DIR, 'screenshots');
+const ASSET_DIR = path.join(__dirname, 'assets');
 const IMAGE_FIELDS = ['front', 'back', 'screenshot'];
 
 // Throwing rather than exiting keeps a missing .env from taking down main-server;
@@ -399,6 +400,16 @@ app.post('/', requireBearer, parseIncoming, async (req, res) => {
   }
 });
 
+app.get('/favicon.png', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.type('png').sendFile(path.join(ASSET_DIR, 'favicon.png'));
+});
+
+app.get('/apple-touch-icon.png', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.type('png').sendFile(path.join(ASSET_DIR, 'apple-touch-icon.png'));
+});
+
 app.get('/screenshots/:name', basicAuth, (req, res) => {
   const name = path.basename(req.params.name);
   const file = path.join(SCREENSHOT_DIR, name);
@@ -455,6 +466,8 @@ app.get('/', basicAuth, (req, res) => {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>FindMe</title>
+<link rel="icon" type="image/png" href="${base}/favicon.png">
+<link rel="apple-touch-icon" sizes="180x180" href="${base}/apple-touch-icon.png">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
 html,body,#map{height:100%;margin:0}
