@@ -166,6 +166,14 @@ async function saveBase64Screenshot(value) {
 app.post('/findme/', requireBearer, parseIncoming, async (req, res) => {
   const body = req.body || {};
 
+  console.log('FindMe POST received', {
+    contentType: req.headers['content-type'],
+    keys: Object.keys(body),
+    screenshotPresent: Object.prototype.hasOwnProperty.call(body, 'screenshot'),
+    screenshotType: typeof body.screenshot,
+    screenshotLength: typeof body.screenshot === 'string' ? body.screenshot.length : null
+  });
+
   // Accept both the concise iOS Shortcut field names and the longer API names.
   const latitude = body.lat ?? body.latitude;
   const longitude = body.lon ?? body.longitude;
