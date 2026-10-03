@@ -1,0 +1,14 @@
+{
+  "name": "findme",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Self-hosted iOS Shortcut location receiver and map",
+  "main": "server.cjs",
+  "scripts": {
+    "start": "node server.cjs"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0"
+  }
+}
