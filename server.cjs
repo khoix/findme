@@ -473,10 +473,20 @@ app.get('/', basicAuth, (req, res) => {
 html,body,#map{height:100%;margin:0}
 body{font-family:system-ui,sans-serif;background:#111}
 #status{position:fixed;z-index:1000;top:10px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.82);color:#fff;padding:7px 12px;border-radius:8px;font-size:13px;white-space:nowrap}
-.popup-shot{display:block;width:280px;max-width:100%;height:auto;margin-top:4px;border-radius:6px}
-.popup-image{margin-top:8px}
-.popup-image-label{font-size:12px;font-weight:600;margin-bottom:2px}
+.popup-shot{display:block;width:100%;height:auto;border-radius:6px;cursor:zoom-in;-webkit-user-select:none;user-select:none}
 .popup-meta{line-height:1.45}
+.image-carousel{width:min(280px,72vw);margin-top:8px}
+.image-carousel-track{display:flex;width:100%;overflow-x:auto;scroll-snap-type:x mandatory;scroll-behavior:smooth;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;touch-action:pan-x;scrollbar-width:none;border-radius:6px}
+.image-carousel-track::-webkit-scrollbar{display:none}
+.image-slide{flex:0 0 100%;width:100%;scroll-snap-align:start;scroll-snap-stop:always}
+.image-slide-label{font-size:12px;font-weight:600;margin:0 0 3px 1px}
+.image-dots{display:flex;justify-content:center;align-items:center;gap:6px;height:18px;padding-top:5px}
+.image-dot{width:7px;height:7px;padding:0;border:0;border-radius:50%;background:#a8a8a8;opacity:.45}
+.image-dot.active{opacity:1;background:#555}
+#image-viewer{position:fixed;inset:0;z-index:10000;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.96);padding:max(20px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(20px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));box-sizing:border-box}
+#image-viewer.open{display:flex}
+#image-viewer-img{display:block;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain}
+#image-viewer-close{position:absolute;top:max(12px,env(safe-area-inset-top));right:max(12px,env(safe-area-inset-right));z-index:10001;width:44px;height:44px;border:0;border-radius:50%;background:rgba(40,40,40,.72);color:#fff;font:32px/40px system-ui,sans-serif;cursor:pointer;-webkit-tap-highlight-color:transparent}
 </style>
 </head>
 <body>
@@ -512,6 +522,49 @@ function escapeHtml(value) {
     .replaceAll("'", '&#039;');
 }
 
+function carouselSlideIndex(track) {
+  if (!track || !track.clientWidth) return 0;
+  return Math.max(0, Math.round(track.scrollLeft / track.clientWidth));
+}
+
+function updateCarouselDots(track) {
+  if (!track) return;
+  const carousel = track.closest('.image-carousel');
+  if (!carousel) return;
+
+  const index = carouselSlideIndex(track);
+  carousel.querySelectorAll('.image-dot').forEach((dot, dotIndex) => {
+    dot.classList.toggle('active', dotIndex === index);
+    dot.setAttribute('aria-current', dotIndex === index ? 'true' : 'false');
+  });
+}
+
+function initializeCarousel(root, initialSlide = 0) {
+  const track = root?.querySelector('.image-carousel-track');
+  if (!track) return;
+
+  let scrollTimer;
+  track.addEventListener('scroll', () => {
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => updateCarouselDots(track), 40);
+  }, { passive: true });
+
+  track.addEventListener('click', event => {
+    const dot = event.target.closest?.('.image-dot');
+    if (!dot) return;
+
+    const index = Number(dot.dataset.slide || 0);
+    track.scrollTo({ left: track.clientWidth * index, behavior: 'smooth' });
+  });
+
+  requestAnimationFrame(() => {
+    if (initialSlide > 0) {
+      track.scrollLeft = track.clientWidth * initialSlide;
+    }
+    updateCarouselDots(track);
+  });
+}
+
 const imageViewer = document.getElementById('image-viewer');
 const imageViewerImg = document.getElementById('image-viewer-img');
 const imageViewerClose = document.getElementById('image-viewer-close');
@@ -538,6 +591,12 @@ document.addEventListener('click', event => {
   }
 });
 
+document.addEventListener('pointerdown', event => {
+  if (event.target.closest?.('.image-carousel')) {
+    event.stopPropagation();
+  }
+}, true);
+
 imageViewerClose.addEventListener('click', event => {
   event.stopPropagation();
   closeImageViewer();
@@ -562,6 +621,9 @@ async function refresh() {
 
     const openPopupMarker = markers.find(marker => marker.isPopupOpen());
     const openPopupKey = openPopupMarker ? openPopupMarker._findmeKey : null;
+    const openPopupElement = openPopupMarker?.getPopup()?.getElement();
+    const openPopupTrack = openPopupElement?.querySelector('.image-carousel-track');
+    const openPopupSlide = carouselSlideIndex(openPopupTrack);
 
     markers.forEach(marker => map.removeLayer(marker));
     markers = [];
@@ -607,12 +669,25 @@ async function refresh() {
       ].filter(([, url]) => Boolean(url));
 
       const images = imageItems.length
-        ? imageItems.map(([label, url]) =>
-            '<div class="popup-image">' +
-              '<div class="popup-image-label">' + escapeHtml(label) + '</div>' +
-              '<img class="popup-shot" src="' + escapeHtml(url) + '" alt="' + escapeHtml(label) + '">' +
-            '</div>'
-          ).join('')
+        ? '<div class="image-carousel">' +
+            '<div class="image-carousel-track">' +
+              imageItems.map(([label, url]) =>
+                '<div class="image-slide">' +
+                  '<div class="image-slide-label">' + escapeHtml(label) + '</div>' +
+                  '<img class="popup-shot" src="' + escapeHtml(url) + '" alt="' + escapeHtml(label) + '">' +
+                '</div>'
+              ).join('') +
+            '</div>' +
+            (imageItems.length > 1
+              ? '<div class="image-dots" aria-label="Image carousel position">' +
+                  imageItems.map(([, url], dotIndex) =>
+                    '<button type="button" class="image-dot' + (dotIndex === 0 ? ' active' : '') +
+                    '" data-slide="' + dotIndex + '" aria-label="Show image ' + (dotIndex + 1) +
+                    '" aria-current="' + (dotIndex === 0 ? 'true' : 'false') + '"></button>'
+                  ).join('') +
+                '</div>'
+              : '') +
+          '</div>'
         : '<div style="margin-top:8px"><em>No images</em></div>';
 
       marker.bindPopup(
@@ -631,6 +706,14 @@ async function refresh() {
       );
 
       marker._findmeKey = pointKey;
+      marker.on('popupopen', () => {
+        const popupElement = marker.getPopup()?.getElement();
+        initializeCarousel(
+          popupElement,
+          openPopupKey && openPopupKey === pointKey ? openPopupSlide : 0
+        );
+      });
+
       marker.addTo(map);
       markers.push(marker);
 
