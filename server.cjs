@@ -40,6 +40,73 @@ function screenshotUrl(base, stored) {
   return `${base}/screenshots/${filename}`;
 }
 
+/** Behind nginx and main-server the socket address is always loopback. */
+function clientIp(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim();
+  }
+  return req.ip || req.socket?.remoteAddress || null;
+}
+
+function writeRequestLog(entry) {
+  console.log(
+    `FindMe POST ${entry.path} -> ${entry.status ?? 'aborted'} ` +
+    `(${entry.durationMs}ms, ${entry.ip || 'unknown ip'})`
+  );
+
+  fs.promises
+    .appendFile(REQUEST_LOG_FILE, JSON.stringify(entry) + '\n')
+    .catch(err => console.error('FindMe: unable to write request log:', err.message));
+}
+
+/**
+ * Logs every POST, including the ones rejected before the route runs (missing
+ * or bad token, unsupported Content-Type) and the ones a client aborts
+ * mid-upload. The route fills in body-shape details on req.requestLog when it
+ * gets that far.
+ */
+function logPostRequests(req, res, next) {
+  if (req.method !== 'POST') return next();
+
+  const startedAt = Date.now();
+  const authHeader = req.headers.authorization || '';
+  const declaredLength = req.headers['content-length'];
+
+  const entry = {
+    receivedAt: new Date().toISOString(),
+    method: req.method,
+    path: req.originalUrl,
+    ip: clientIp(req),
+    userAgent: req.headers['user-agent'] || null,
+    contentType: req.headers['content-type'] || null,
+    contentLength: declaredLength === undefined ? null : Number(declaredLength),
+    // Scheme only; the credential itself must never reach the log.
+    authScheme: authHeader ? authHeader.split(' ')[0] : null
+  };
+
+  req.requestLog = entry;
+
+  // 'close' also covers aborted uploads, where 'finish' never fires.
+  let written = false;
+  const finalize = () => {
+    if (written) return;
+    written = true;
+    entry.durationMs = Date.now() - startedAt;
+    entry.completed = res.writableEnded;
+    // An aborted request never sent a status; res.statusCode would still read 200.
+    entry.status = res.writableEnded ? res.statusCode : null;
+    writeRequestLog(entry);
+  };
+
+  res.on('finish', finalize);
+  res.on('close', finalize);
+
+  next();
+}
+
+app.use(logPostRequests);
+
 function basicAuth(req, res, next) {
   const header = req.headers.authorization || '';
   if (!header.startsWith('Basic ')) {
@@ -179,17 +246,16 @@ async function saveBase64Screenshot(value) {
 app.post('/', requireBearer, parseIncoming, async (req, res) => {
   const body = req.body || {};
 
-  const requestDebug = {
-    receivedAt: new Date().toISOString(),
-    contentType: req.headers['content-type'] || null,
-    keys: Object.keys(body),
-    screenshotPresent: Object.prototype.hasOwnProperty.call(body, 'screenshot'),
-    screenshotType: typeof body.screenshot,
-    screenshotLength: typeof body.screenshot === 'string' ? body.screenshot.length : null,
-    screenshotPreview: typeof body.screenshot === 'string' ? body.screenshot.slice(0, 32) : null
-  };
-
-  fs.appendFileSync(REQUEST_LOG_FILE, JSON.stringify(requestDebug) + '\n');
+  if (req.requestLog) {
+    Object.assign(req.requestLog, {
+      keys: Object.keys(body),
+      screenshotPresent: Object.prototype.hasOwnProperty.call(body, 'screenshot'),
+      screenshotType: typeof body.screenshot,
+      screenshotLength: typeof body.screenshot === 'string' ? body.screenshot.length : null,
+      screenshotPreview: typeof body.screenshot === 'string' ? body.screenshot.slice(0, 32) : null,
+      uploadedFile: req.file ? req.file.filename : null
+    });
+  }
 
   // Accept both the concise iOS Shortcut field names and the longer API names.
   const latitude = body.lat ?? body.latitude;
