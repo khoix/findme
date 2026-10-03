@@ -1,3 +1,7 @@
+# Only needed when running FindMe standalone. When it is mounted in
+# main-server, the main-server process (pm2) serves /findme and this unit
+# should stay disabled to avoid two processes writing the same data/ directory.
+
 [Unit]
 Description=FindMe location receiver
 After=network.target
@@ -6,7 +10,7 @@ After=network.target
 Type=simple
 WorkingDirectory=/var/www/html/findme
 EnvironmentFile=/var/www/html/findme/.env
-ExecStart=/usr/bin/node /var/www/html/findme/server.cjs
+ExecStart=/usr/bin/node /var/www/html/findme/standalone.cjs
 Restart=on-failure
 RestartSec=3
 User=www-data

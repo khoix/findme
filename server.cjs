@@ -3,10 +3,12 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const multer = require('multer');
-require('dotenv').config();
+
+// Resolve .env next to this file so the app works when main-server requires it
+// from a different working directory.
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const app = express();
-const PORT = Number(process.env.PORT || 3210);
 const POST_TOKEN = process.env.FINDME_POST_TOKEN;
 const VIEW_USER = process.env.FINDME_VIEW_USER;
 const VIEW_PASSWORD = process.env.FINDME_VIEW_PASSWORD;
@@ -16,14 +18,27 @@ const DATA_FILE = path.join(DATA_DIR, 'locations.jsonl');
 const REQUEST_LOG_FILE = path.join(DATA_DIR, 'requests.jsonl');
 const SCREENSHOT_DIR = path.join(DATA_DIR, 'screenshots');
 
+// Throwing rather than exiting keeps a missing .env from taking down main-server;
+// the mount is wrapped in a try/catch that serves a 503 placeholder instead.
 if (!POST_TOKEN || !VIEW_USER || !VIEW_PASSWORD) {
-  console.error('Missing FINDME_POST_TOKEN, FINDME_VIEW_USER, or FINDME_VIEW_PASSWORD');
-  process.exit(1);
+  throw new Error('Missing FINDME_POST_TOKEN, FINDME_VIEW_USER, or FINDME_VIEW_PASSWORD');
 }
 
 fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
 app.disable('x-powered-by');
+
+/** Public path prefix: '' standalone, '/findme' when mounted in main-server. */
+function mountBase(req) {
+  return req.baseUrl || '';
+}
+
+/** Records store a bare filename; older records stored a fully-qualified path. */
+function screenshotUrl(base, stored) {
+  if (!stored) return null;
+  const filename = path.basename(stored);
+  return `${base}/screenshots/${filename}`;
+}
 
 function basicAuth(req, res, next) {
   const header = req.headers.authorization || '';
@@ -158,13 +173,10 @@ async function saveBase64Screenshot(value) {
   const filename = `${Date.now()}-${crypto.randomUUID()}${ext}`;
   await fs.promises.writeFile(path.join(SCREENSHOT_DIR, filename), buffer);
 
-  return {
-    filename,
-    url: `/findme/screenshots/${filename}`
-  };
+  return { filename };
 }
 
-app.post('/findme/', requireBearer, parseIncoming, async (req, res) => {
+app.post('/', requireBearer, parseIncoming, async (req, res) => {
   const body = req.body || {};
 
   const requestDebug = {
@@ -212,12 +224,7 @@ app.post('/findme/', requireBearer, parseIncoming, async (req, res) => {
     return res.status(400).json({ error: 'Invalid battery level' });
   }
 
-  let screenshot = req.file
-    ? {
-        filename: req.file.filename,
-        url: `/findme/screenshots/${req.file.filename}`
-      }
-    : null;
+  let screenshot = req.file ? { filename: req.file.filename } : null;
 
   try {
     // For JSON posts, Shortcuts sends the screenshot as Base64 text.
@@ -230,7 +237,7 @@ app.post('/findme/', requireBearer, parseIncoming, async (req, res) => {
       longitude: lon,
       timestamp: timestamp || null,
       battery: batt,
-      screenshot: screenshot ? screenshot.url : null,
+      screenshot: screenshot ? screenshot.filename : null,
       receivedAt: new Date().toISOString()
     };
 
@@ -251,7 +258,7 @@ app.post('/findme/', requireBearer, parseIncoming, async (req, res) => {
   }
 });
 
-app.get('/findme/screenshots/:name', basicAuth, (req, res) => {
+app.get('/screenshots/:name', basicAuth, (req, res) => {
   const name = path.basename(req.params.name);
   const file = path.join(SCREENSHOT_DIR, name);
 
@@ -261,7 +268,7 @@ app.get('/findme/screenshots/:name', basicAuth, (req, res) => {
   res.sendFile(file);
 });
 
-app.get('/findme/api/locations', basicAuth, async (req, res) => {
+app.get('/api/locations', basicAuth, async (req, res) => {
   res.set('Cache-Control', 'no-store');
 
   try {
@@ -282,15 +289,22 @@ app.get('/findme/api/locations', basicAuth, async (req, res) => {
       .filter(Boolean)
       .slice(-1000);
 
-    res.json(points);
+    const base = mountBase(req);
+
+    res.json(points.map(point => ({
+      ...point,
+      screenshot: screenshotUrl(base, point.screenshot)
+    })));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Unable to read locations' });
   }
 });
 
-app.get('/findme/', basicAuth, (req, res) => {
+app.get('/', basicAuth, (req, res) => {
   res.set('Cache-Control', 'no-store');
+
+  const base = mountBase(req);
 
   res.type('html').send(`<!doctype html>
 <html>
@@ -338,7 +352,7 @@ function escapeHtml(value) {
 
 async function refresh() {
   try {
-    const response = await fetch('/findme/api/locations', { cache: 'no-store' });
+    const response = await fetch('${base}/api/locations', { cache: 'no-store' });
     if (!response.ok) throw new Error('HTTP ' + response.status);
 
     const points = await response.json();
@@ -434,6 +448,5 @@ setInterval(refresh, 10000);
 </html>`);
 });
 
-app.listen(PORT, '127.0.0.1', () => {
-  console.log(`FindMe listening at http://127.0.0.1:${PORT}/findme/`);
-});
+// Export the Express app for mounting (main-server.js mounts this under /findme).
+module.exports = app;

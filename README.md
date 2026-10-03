@@ -26,13 +26,41 @@ npm install
 cp .env.example .env
 ```
 
-Edit `.env`, then start:
+Edit `.env` before running either mode below.
+
+## Running
+
+`server.cjs` exports a mount-relative Express app and does not listen on its own,
+so the same code serves both modes and all generated links adapt to the prefix
+the app is mounted under.
+
+### Mounted in main-server (recommended)
+
+`main-server.js` already mounts it:
+
+```javascript
+const findmeApp = require('../findme/server.cjs');
+app.use('/findme', mountedAppEnabledGate('/findme'), findmeApp);
+```
+
+It is served at `/findme` on the main server, and can be toggled on and off from
+App Admin like the other mounted apps. If `.env` is missing or incomplete the
+mount fails on its own and main-server serves a 503 at `/findme` rather than
+failing to boot.
+
+Because screenshots can be up to 12 MB, main-server skips its global body
+parsers for `/findme` and lets this app parse its own request bodies.
+
+### Standalone
 
 ```bash
 npm start
 ```
 
-The app listens on `127.0.0.1:3210` by default.
+This runs `standalone.cjs`, which mounts the app under `/findme` and listens on
+`127.0.0.1:3210`. Set `FINDME_BASE_PATH` to serve it under a different prefix.
+Do not run this at the same time as the main-server mount — both write to the
+same `data/` directory.
 
 ## iOS Shortcut
 
@@ -86,11 +114,15 @@ The map refreshes every 10 seconds.
 
 ## Reverse proxy
 
-See `deploy/nginx.conf.example`.
+When mounted in main-server, FindMe is reached through the existing main-server
+proxy block and needs no configuration of its own.
+
+For standalone runs, see `deploy/nginx.conf.example`:
 
 ```nginx
 location /findme/ {
     proxy_pass http://127.0.0.1:3210;
+    client_max_body_size 16m;
 }
 ```
 

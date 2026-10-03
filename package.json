@@ -5,7 +5,7 @@
   "description": "Self-hosted iOS Shortcut location receiver and interactive map",
   "main": "server.cjs",
   "scripts": {
-    "start": "node server.cjs"
+    "start": "node standalone.cjs"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
