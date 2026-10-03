@@ -469,6 +469,10 @@ body{font-family:system-ui,sans-serif;background:#111}
 <body>
 <div id="status">Loading…</div>
 <div id="map"></div>
+<div id="image-viewer" aria-hidden="true">
+  <button id="image-viewer-close" type="button" aria-label="Close image">×</button>
+  <img id="image-viewer-img" alt="">
+</div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
@@ -495,12 +499,56 @@ function escapeHtml(value) {
     .replaceAll("'", '&#039;');
 }
 
+const imageViewer = document.getElementById('image-viewer');
+const imageViewerImg = document.getElementById('image-viewer-img');
+const imageViewerClose = document.getElementById('image-viewer-close');
+
+function openImageViewer(src, alt) {
+  imageViewerImg.src = src;
+  imageViewerImg.alt = alt || 'Location image';
+  imageViewer.classList.add('open');
+  imageViewer.setAttribute('aria-hidden', 'false');
+}
+
+function closeImageViewer() {
+  imageViewer.classList.remove('open');
+  imageViewer.setAttribute('aria-hidden', 'true');
+  imageViewerImg.removeAttribute('src');
+}
+
+document.addEventListener('click', event => {
+  const image = event.target.closest?.('.popup-shot');
+  if (image) {
+    event.preventDefault();
+    event.stopPropagation();
+    openImageViewer(image.src, image.alt);
+  }
+});
+
+imageViewerClose.addEventListener('click', event => {
+  event.stopPropagation();
+  closeImageViewer();
+});
+
+imageViewer.addEventListener('click', event => {
+  if (event.target === imageViewer) closeImageViewer();
+});
+
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && imageViewer.classList.contains('open')) {
+    closeImageViewer();
+  }
+});
+
 async function refresh() {
   try {
     const response = await fetch('${base}/api/locations', { cache: 'no-store' });
     if (!response.ok) throw new Error('HTTP ' + response.status);
 
     const points = await response.json();
+
+    const openPopupMarker = markers.find(marker => marker.isPopupOpen());
+    const openPopupKey = openPopupMarker ? openPopupMarker._findmeKey : null;
 
     markers.forEach(marker => map.removeLayer(marker));
     markers = [];
@@ -522,6 +570,8 @@ async function refresh() {
 
     points.forEach((point, index) => {
       const latest = index === points.length - 1;
+      const pointKey = point.receivedAt ||
+        [point.latitude, point.longitude, point.timestamp, index].join('|');
 
       const marker = L.circleMarker(
         [point.latitude, point.longitude],
@@ -567,8 +617,13 @@ async function refresh() {
         { maxWidth: 320 }
       );
 
+      marker._findmeKey = pointKey;
       marker.addTo(map);
       markers.push(marker);
+
+      if (openPopupKey && openPopupKey === pointKey) {
+        marker.openPopup();
+      }
     });
 
     const latest = points[points.length - 1];
