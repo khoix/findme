@@ -5,13 +5,13 @@ A small self-hosted location receiver and interactive map for an iOS Shortcut.
 ## Features
 
 - `POST /findme/` accepts location updates.
-- Optional screenshot upload with each point.
+- Optional image upload with each point: front camera, back camera, or screenshot.
 - `GET /findme/` displays received points on an interactive Leaflet/OpenStreetMap map.
 - Clicking a point shows:
   - latitude and longitude
   - battery percentage
   - timestamp
-  - screenshot, when one was uploaded
+  - front/back camera images or screenshot, when uploaded
 - `GET /findme/api/locations` returns recent location history.
 - Bearer-token authentication for POSTs.
 - HTTP Basic authentication for the map, API, and screenshots.
@@ -83,21 +83,23 @@ JSON is still supported:
 }
 ```
 
-### With a screenshot
+### With images
 
-Change **Request Body** from **JSON** to **Form** and add these fields:
+JSON may include these optional Base64 text fields:
 
-| Field | Shortcut value |
+| Field | Meaning |
 | --- | --- |
-| `latitude` | Current Location → Latitude |
-| `longitude` | Current Location → Longitude |
-| `timestamp` | Current Date / formatted date |
-| `battery` | Battery Level |
-| `screenshot` | output of **Take Screenshot** |
+| `front` | front-camera image |
+| `back` | back-camera image |
+| `screenshot` | screenshot image |
 
-The screenshot field name must be exactly `screenshot`.
+The server accepts **at most two images per update**. Supported combinations are:
 
-For the current automation, keep **Take Screenshot** inside the unlocked branch. When no screenshot is available, you can either omit the `screenshot` form field or post the metadata as JSON.
+- `front` + `back`
+- `front` + `screenshot`
+- any single one of the three
+
+`back` and `screenshot` cannot be sent together in the same update.
 
 ## Map behavior
 
@@ -108,7 +110,7 @@ Clicking a point opens a popup showing:
 - latitude and longitude
 - battery level
 - received/device timestamp
-- screenshot thumbnail when available
+- any front, back, and/or screenshot images attached to that point
 
 The map refreshes every 10 seconds.
 
