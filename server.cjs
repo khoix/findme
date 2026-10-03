@@ -17,6 +17,7 @@ const DATA_DIR = path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'locations.jsonl');
 const REQUEST_LOG_FILE = path.join(DATA_DIR, 'requests.jsonl');
 const SCREENSHOT_DIR = path.join(DATA_DIR, 'screenshots');
+const IMAGE_FIELDS = ['front', 'back', 'screenshot'];
 
 // Throwing rather than exiting keeps a missing .env from taking down main-server;
 // the mount is wrapped in a try/catch that serves a 503 placeholder instead.
@@ -152,25 +153,42 @@ const upload = multer({
       cb(null, `${Date.now()}-${crypto.randomUUID()}${ext}`);
     }
   }),
-  limits: { fileSize: 12 * 1024 * 1024, files: 1 },
+  // A FindMe update may contain front+back or front+screenshot, never 3 images.
+  limits: { fileSize: 12 * 1024 * 1024, files: 2 },
   fileFilter: (req, file, cb) => {
     if (!file.mimetype || !file.mimetype.startsWith('image/')) {
-      return cb(new Error('Screenshot must be an image'));
+      return cb(new Error('Uploaded file must be an image'));
     }
     cb(null, true);
   }
 });
 
+function uploadedFiles(req) {
+  if (!req.files) return [];
+  return Object.values(req.files).flat().filter(Boolean);
+}
+
+function removeUploadedFiles(req) {
+  for (const file of uploadedFiles(req)) {
+    fs.promises.unlink(file.path).catch(() => {});
+  }
+}
+
 function parseIncoming(req, res, next) {
   if (req.is('multipart/form-data')) {
-    return upload.single('screenshot')(req, res, err => {
-      if (err) return res.status(400).json({ error: err.message });
+    const fields = IMAGE_FIELDS.map(name => ({ name, maxCount: 1 }));
+    return upload.fields(fields)(req, res, err => {
+      if (err) {
+        removeUploadedFiles(req);
+        return res.status(400).json({ error: err.message });
+      }
       next();
     });
   }
 
   if (req.is('application/json')) {
-    return express.json({ limit: '16mb' })(req, res, next);
+    // Two 12 MB images can expand to roughly 32 MB total when Base64 encoded.
+    return express.json({ limit: '36mb' })(req, res, next);
   }
 
   return res.status(415).json({
@@ -213,9 +231,9 @@ function imageExtension(buffer, declaredMime) {
   return null;
 }
 
-async function saveBase64Screenshot(value) {
+async function saveBase64Image(value, fieldName = 'image') {
   if (value === undefined || value === null || value === '') return null;
-  if (typeof value !== 'string') throw new Error('screenshot must be Base64 text');
+  if (typeof value !== 'string') throw new Error(`${fieldName} must be Base64 text`);
 
   let base64 = value.trim();
   let declaredMime = null;
@@ -231,11 +249,11 @@ async function saveBase64Screenshot(value) {
 
   const buffer = Buffer.from(base64, 'base64');
 
-  if (!buffer.length) throw new Error('screenshot contains invalid Base64 data');
-  if (buffer.length > 12 * 1024 * 1024) throw new Error('screenshot exceeds 12 MB');
+  if (!buffer.length) throw new Error(`${fieldName} contains invalid Base64 data`);
+  if (buffer.length > 12 * 1024 * 1024) throw new Error(`${fieldName} exceeds 12 MB`);
 
   const ext = imageExtension(buffer, declaredMime);
-  if (!ext) throw new Error('screenshot is not a supported image');
+  if (!ext) throw new Error(`${fieldName} is not a supported image`);
 
   const filename = `${Date.now()}-${crypto.randomUUID()}${ext}`;
   await fs.promises.writeFile(path.join(SCREENSHOT_DIR, filename), buffer);
@@ -246,14 +264,26 @@ async function saveBase64Screenshot(value) {
 app.post('/', requireBearer, parseIncoming, async (req, res) => {
   const body = req.body || {};
 
+  const imageBodyState = Object.fromEntries(
+    IMAGE_FIELDS.map(name => {
+      const value = body[name];
+      return [name, {
+        present: Object.prototype.hasOwnProperty.call(body, name),
+        type: typeof value,
+        length: typeof value === 'string' ? value.length : null
+      }];
+    })
+  );
+
   if (req.requestLog) {
     Object.assign(req.requestLog, {
       keys: Object.keys(body),
-      screenshotPresent: Object.prototype.hasOwnProperty.call(body, 'screenshot'),
-      screenshotType: typeof body.screenshot,
-      screenshotLength: typeof body.screenshot === 'string' ? body.screenshot.length : null,
-      screenshotPreview: typeof body.screenshot === 'string' ? body.screenshot.slice(0, 32) : null,
-      uploadedFile: req.file ? req.file.filename : null
+      images: imageBodyState,
+      uploadedFiles: uploadedFiles(req).map(file => ({
+        field: file.fieldname,
+        filename: file.filename,
+        size: file.size
+      }))
     });
   }
 
@@ -278,7 +308,7 @@ app.post('/', requireBearer, parseIncoming, async (req, res) => {
     lon < -180 ||
     lon > 180
   ) {
-    if (req.file) fs.promises.unlink(req.file.path).catch(() => {});
+    removeUploadedFiles(req);
     return res.status(400).json({ error: 'Invalid latitude or longitude' });
   }
 
@@ -286,16 +316,56 @@ app.post('/', requireBearer, parseIncoming, async (req, res) => {
     batt !== null &&
     (!Number.isFinite(batt) || batt < 0 || batt > 100)
   ) {
-    if (req.file) fs.promises.unlink(req.file.path).catch(() => {});
+    removeUploadedFiles(req);
     return res.status(400).json({ error: 'Invalid battery level' });
   }
 
-  let screenshot = req.file ? { filename: req.file.filename } : null;
+  const multipartByField = Object.fromEntries(
+    IMAGE_FIELDS.map(name => [name, req.files?.[name]?.[0] || null])
+  );
+
+  const activeImageFields = IMAGE_FIELDS.filter(name => {
+    if (multipartByField[name]) return true;
+    const value = body[name];
+    return typeof value === 'string'
+      ? value.trim().length > 0
+      : value !== undefined && value !== null;
+  });
+
+  if (activeImageFields.length > 2) {
+    removeUploadedFiles(req);
+    return res.status(400).json({
+      error: 'At most two images may be sent per update'
+    });
+  }
+
+  if (activeImageFields.includes('back') && activeImageFields.includes('screenshot')) {
+    removeUploadedFiles(req);
+    return res.status(400).json({
+      error: 'back and screenshot are mutually exclusive; send front+back or front+screenshot'
+    });
+  }
+
+  const images = {};
+  const base64Saved = [];
 
   try {
-    // For JSON posts, Shortcuts sends the screenshot as Base64 text.
-    if (!screenshot && body.screenshot) {
-      screenshot = await saveBase64Screenshot(body.screenshot);
+    for (const name of IMAGE_FIELDS) {
+      const uploaded = multipartByField[name];
+
+      if (uploaded) {
+        images[name] = { filename: uploaded.filename };
+        continue;
+      }
+
+      const value = body[name];
+      if (typeof value === 'string' && value.trim()) {
+        const saved = await saveBase64Image(value, name);
+        if (saved) {
+          images[name] = saved;
+          base64Saved.push(saved);
+        }
+      }
     }
 
     const point = {
@@ -303,7 +373,9 @@ app.post('/', requireBearer, parseIncoming, async (req, res) => {
       longitude: lon,
       timestamp: timestamp || null,
       battery: batt,
-      screenshot: screenshot ? screenshot.filename : null,
+      front: images.front ? images.front.filename : null,
+      back: images.back ? images.back.filename : null,
+      screenshot: images.screenshot ? images.screenshot.filename : null,
       receivedAt: new Date().toISOString()
     };
 
@@ -311,12 +383,15 @@ app.post('/', requireBearer, parseIncoming, async (req, res) => {
 
     res.json({
       ok: true,
-      screenshot: Boolean(screenshot)
+      front: Boolean(images.front),
+      back: Boolean(images.back),
+      screenshot: Boolean(images.screenshot)
     });
   } catch (err) {
-    if (req.file) fs.promises.unlink(req.file.path).catch(() => {});
-    if (screenshot && !req.file) {
-      fs.promises.unlink(path.join(SCREENSHOT_DIR, screenshot.filename)).catch(() => {});
+    removeUploadedFiles(req);
+
+    for (const image of base64Saved) {
+      fs.promises.unlink(path.join(SCREENSHOT_DIR, image.filename)).catch(() => {});
     }
 
     console.error(err);
@@ -359,6 +434,8 @@ app.get('/api/locations', basicAuth, async (req, res) => {
 
     res.json(points.map(point => ({
       ...point,
+      front: screenshotUrl(base, point.front),
+      back: screenshotUrl(base, point.back),
       screenshot: screenshotUrl(base, point.screenshot)
     })));
   } catch (err) {
@@ -383,7 +460,9 @@ app.get('/', basicAuth, (req, res) => {
 html,body,#map{height:100%;margin:0}
 body{font-family:system-ui,sans-serif;background:#111}
 #status{position:fixed;z-index:1000;top:10px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.82);color:#fff;padding:7px 12px;border-radius:8px;font-size:13px;white-space:nowrap}
-.popup-shot{display:block;width:280px;max-width:100%;height:auto;margin-top:8px;border-radius:6px}
+.popup-shot{display:block;width:280px;max-width:100%;height:auto;margin-top:4px;border-radius:6px}
+.popup-image{margin-top:8px}
+.popup-image-label{font-size:12px;font-weight:600;margin-bottom:2px}
 .popup-meta{line-height:1.45}
 </style>
 </head>
@@ -458,9 +537,20 @@ async function refresh() {
         Number(point.latitude).toFixed(6) + ', ' +
         Number(point.longitude).toFixed(6);
 
-      const screenshot = point.screenshot
-        ? '<img class="popup-shot" src="' + escapeHtml(point.screenshot) + '" alt="Screenshot">'
-        : '<div style="margin-top:8px"><em>No screenshot</em></div>';
+      const imageItems = [
+        ['Front', point.front],
+        ['Back', point.back],
+        ['Screenshot', point.screenshot]
+      ].filter(([, url]) => Boolean(url));
+
+      const images = imageItems.length
+        ? imageItems.map(([label, url]) =>
+            '<div class="popup-image">' +
+              '<div class="popup-image-label">' + escapeHtml(label) + '</div>' +
+              '<img class="popup-shot" src="' + escapeHtml(url) + '" alt="' + escapeHtml(label) + '">' +
+            '</div>'
+          ).join('')
+        : '<div style="margin-top:8px"><em>No images</em></div>';
 
       marker.bindPopup(
         '<div class="popup-meta">' +
@@ -472,7 +562,7 @@ async function refresh() {
               : 'Unknown') +
           '<br><strong>Time:</strong> ' +
             escapeHtml(new Date(time).toLocaleString()) +
-          screenshot +
+          images +
         '</div>',
         { maxWidth: 320 }
       );
