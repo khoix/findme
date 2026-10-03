@@ -1,15 +1,21 @@
 # findme
 
-A small self-hosted location receiver and map for an iOS Shortcut.
+A small self-hosted location receiver and interactive map for an iOS Shortcut.
 
 ## Features
 
 - `POST /findme/` accepts location updates.
-- `GET /findme/` displays recent points on a Leaflet/OpenStreetMap map.
+- Optional screenshot upload with each point.
+- `GET /findme/` displays received points on an interactive Leaflet/OpenStreetMap map.
+- Clicking a point shows:
+  - latitude and longitude
+  - battery percentage
+  - timestamp
+  - screenshot, when one was uploaded
 - `GET /findme/api/locations` returns recent location history.
 - Bearer-token authentication for POSTs.
-- HTTP Basic authentication for the map/API.
-- Location history stored locally in `data/locations.jsonl` and excluded from Git.
+- HTTP Basic authentication for the map, API, and screenshots.
+- Location history and screenshots are stored under `data/`, which is excluded from Git.
 
 ## Install
 
@@ -35,9 +41,10 @@ Configure **Get Contents of URL**:
 - URL: `https://www.khoix.net/findme/`
 - Method: `POST`
 - Header: `Authorization: Bearer YOUR_LONG_RANDOM_TOKEN`
-- Request Body: JSON
 
-Example:
+### Without a screenshot
+
+JSON is still supported:
 
 ```json
 {
@@ -48,13 +55,46 @@ Example:
 }
 ```
 
-Use Number fields for latitude, longitude, and battery, and Text for timestamp.
+### With a screenshot
+
+Change **Request Body** from **JSON** to **Form** and add these fields:
+
+| Field | Shortcut value |
+| --- | --- |
+| `latitude` | Current Location → Latitude |
+| `longitude` | Current Location → Longitude |
+| `timestamp` | Current Date / formatted date |
+| `battery` | Battery Level |
+| `screenshot` | output of **Take Screenshot** |
+
+The screenshot field name must be exactly `screenshot`.
+
+For the current automation, keep **Take Screenshot** inside the unlocked branch. When no screenshot is available, you can either omit the `screenshot` form field or post the metadata as JSON.
+
+## Map behavior
+
+The map is interactive. Every received location is plotted as a clickable point and the points are connected as a route.
+
+Clicking a point opens a popup showing:
+
+- latitude and longitude
+- battery level
+- received/device timestamp
+- screenshot thumbnail when available
+
+The map refreshes every 10 seconds.
 
 ## Reverse proxy
 
-See `deploy/nginx.conf.example`. Keep the upstream bound to localhost and expose it through HTTPS.
+See `deploy/nginx.conf.example`.
 
-## Test
+```nginx
+location /findme/ {
+    proxy_pass http://127.0.0.1:3210;
+}
+```
+
+## Test without screenshot
 
 ```bash
 curl -X POST https://www.khoix.net/findme/ \
@@ -63,10 +103,22 @@ curl -X POST https://www.khoix.net/findme/ \
   -d '{"latitude":35.7796,"longitude":-78.6382,"timestamp":"2026-10-02T21:58:37-04:00","battery":74}'
 ```
 
-A successful request returns:
+## Test with screenshot
+
+```bash
+curl -X POST https://www.khoix.net/findme/ \
+  -H 'Authorization: Bearer YOUR_LONG_RANDOM_TOKEN' \
+  -F 'latitude=35.7796' \
+  -F 'longitude=-78.6382' \
+  -F 'timestamp=2026-10-02T21:58:37-04:00' \
+  -F 'battery=74' \
+  -F 'screenshot=@screenshot.png'
+```
+
+A successful response looks like:
 
 ```json
-{"ok":true}
+{"ok":true,"screenshot":true}
 ```
 
 ## Security
@@ -74,4 +126,5 @@ A successful request returns:
 - Never commit the real Bearer token or map password.
 - Keep Node bound to localhost.
 - Use HTTPS externally.
-- `data/` and `.env` are ignored.
+- `.env`, location history, and screenshots are excluded from Git.
+- Screenshot files are only served through the authenticated map endpoint.
