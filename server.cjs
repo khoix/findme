@@ -109,32 +109,213 @@ function logPostRequests(req, res, next) {
 
 app.use(logPostRequests);
 
-function basicAuth(req, res, next) {
-  const header = req.headers.authorization || '';
-  if (!header.startsWith('Basic ')) {
-    res.set('WWW-Authenticate', 'Basic realm="FindMe"');
-    return res.status(401).send('Authentication required');
-  }
+const SESSION_COOKIE = 'findme_session';
+const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
+const SESSION_KEY = crypto
+  .createHash('sha256')
+  .update(`${VIEW_PASSWORD}\0${POST_TOKEN}`)
+  .digest();
 
-  let decoded = '';
-  try {
-    decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
-  } catch {
-    return res.status(401).send('Invalid credentials');
-  }
-
-  const i = decoded.indexOf(':');
-  if (i < 0) return res.status(401).send('Invalid credentials');
-
-  const username = decoded.slice(0, i);
-  const password = decoded.slice(i + 1);
-
-  if (username !== VIEW_USER || password !== VIEW_PASSWORD) {
-    return res.status(401).send('Invalid credentials');
-  }
-
-  next();
+function safeEqualText(actual, expected) {
+  const a = Buffer.from(String(actual ?? ''), 'utf8');
+  const b = Buffer.from(String(expected ?? ''), 'utf8');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
+
+function cookieMap(req) {
+  const header = req.headers.cookie || '';
+  const cookies = {};
+  for (const part of header.split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    const name = part.slice(0, i).trim();
+    const value = part.slice(i + 1).trim();
+    if (!name) continue;
+    try {
+      cookies[name] = decodeURIComponent(value);
+    } catch {
+      cookies[name] = value;
+    }
+  }
+  return cookies;
+}
+
+function signSessionPayload(payload) {
+  return crypto
+    .createHmac('sha256', SESSION_KEY)
+    .update(payload)
+    .digest('base64url');
+}
+
+function createSessionToken() {
+  const payload = Buffer.from(JSON.stringify({
+    user: VIEW_USER,
+    expiresAt: Date.now() + SESSION_TTL_SECONDS * 1000
+  }), 'utf8').toString('base64url');
+
+  return `${payload}.${signSessionPayload(payload)}`;
+}
+
+function hasValidViewSession(req) {
+  const token = cookieMap(req)[SESSION_COOKIE];
+  if (!token) return false;
+
+  const separator = token.lastIndexOf('.');
+  if (separator <= 0) return false;
+
+  const payload = token.slice(0, separator);
+  const suppliedSignature = token.slice(separator + 1);
+  const expectedSignature = signSessionPayload(payload);
+
+  if (!safeEqualText(suppliedSignature, expectedSignature)) return false;
+
+  try {
+    const session = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return session.user === VIEW_USER &&
+      Number.isFinite(session.expiresAt) &&
+      session.expiresAt > Date.now();
+  } catch {
+    return false;
+  }
+}
+
+function sessionCookiePath(req) {
+  return mountBase(req) || '/';
+}
+
+function isHttpsRequest(req) {
+  const forwarded = req.headers['x-forwarded-proto'];
+  const proto = typeof forwarded === 'string'
+    ? forwarded.split(',')[0].trim().toLowerCase()
+    : '';
+  return req.secure || proto === 'https';
+}
+
+function setViewSession(req, res) {
+  const attributes = [
+    `${SESSION_COOKIE}=${encodeURIComponent(createSessionToken())}`,
+    `Path=${sessionCookiePath(req)}`,
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${SESSION_TTL_SECONDS}`
+  ];
+
+  if (isHttpsRequest(req)) attributes.push('Secure');
+  res.setHeader('Set-Cookie', attributes.join('; '));
+}
+
+function clearViewSession(req, res) {
+  const attributes = [
+    `${SESSION_COOKIE}=`,
+    `Path=${sessionCookiePath(req)}`,
+    'HttpOnly',
+    'SameSite=Lax',
+    'Max-Age=0'
+  ];
+
+  if (isHttpsRequest(req)) attributes.push('Secure');
+  res.setHeader('Set-Cookie', attributes.join('; '));
+}
+
+function requireViewPage(req, res, next) {
+  if (hasValidViewSession(req)) return next();
+  const base = mountBase(req);
+  return res.redirect(302, `${base}/login`);
+}
+
+function requireViewSession(req, res, next) {
+  if (hasValidViewSession(req)) return next();
+  return res.status(401).json({ error: 'Authentication required' });
+}
+
+function requireImageSession(req, res, next) {
+  if (hasValidViewSession(req)) return next();
+  return res.status(401).send('Authentication required');
+}
+
+function loginPage(base, invalid = false) {
+  const error = invalid
+    ? '<div class="login-error" role="alert">Incorrect username or password.</div>'
+    : '';
+
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#087cf0">
+<title>FindMe Login</title>
+<link rel="icon" type="image/png" href="${base}/favicon.png">
+<link rel="apple-touch-icon" sizes="180x180" href="${base}/apple-touch-icon.png">
+<style>
+*{box-sizing:border-box}
+html,body{min-height:100%;margin:0}
+body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 50% 15%,#43c7ff 0,#0a83f5 32%,#0756dc 68%,#0632a7 100%);color:#132037;display:flex;align-items:center;justify-content:center;padding:max(24px,env(safe-area-inset-top)) 20px max(24px,env(safe-area-inset-bottom))}
+.login-card{width:min(100%,390px);padding:32px 28px 28px;border-radius:28px;background:rgba(255,255,255,.94);box-shadow:0 24px 70px rgba(0,20,90,.35);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
+.login-icon{display:block;width:104px;height:104px;object-fit:cover;margin:-4px auto 18px;border-radius:24px;box-shadow:0 12px 28px rgba(0,70,180,.22)}
+h1{font-size:28px;line-height:1.05;text-align:center;margin:0 0 8px}
+.login-subtitle{text-align:center;color:#5b6779;font-size:14px;margin:0 0 26px}
+.login-field{display:block;margin:0 0 15px}
+.login-label{display:block;font-size:13px;font-weight:650;margin:0 0 6px;color:#354155}
+.login-input{width:100%;height:50px;border:1px solid #ccd5e2;border-radius:14px;padding:0 15px;font:16px system-ui;background:#fff;color:#142033;outline:none;transition:border-color .15s,box-shadow .15s}
+.login-input:focus{border-color:#0b7ff0;box-shadow:0 0 0 4px rgba(11,127,240,.13)}
+.login-button{width:100%;height:50px;border:0;border-radius:14px;margin-top:5px;background:linear-gradient(180deg,#1495ff,#096be8);color:#fff;font:700 16px system-ui;box-shadow:0 8px 20px rgba(8,104,225,.3);cursor:pointer}
+.login-button:active{transform:translateY(1px)}
+.login-error{background:#fff0f0;border:1px solid #ffc9c9;color:#a82121;border-radius:12px;padding:10px 12px;margin:0 0 15px;font-size:13px}
+.login-note{text-align:center;color:#758196;font-size:12px;margin:18px 0 0}
+</style>
+</head>
+<body>
+<main class="login-card">
+  <img class="login-icon" src="${base}/apple-touch-icon.png" alt="">
+  <h1>FindMe</h1>
+  <p class="login-subtitle">Sign in to view location history.</p>
+  ${error}
+  <form method="post" action="${base}/login" autocomplete="on">
+    <label class="login-field">
+      <span class="login-label">Username</span>
+      <input class="login-input" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+    </label>
+    <label class="login-field">
+      <span class="login-label">Password</span>
+      <input class="login-input" name="password" type="password" autocomplete="current-password" required>
+    </label>
+    <button class="login-button" type="submit">Sign In</button>
+  </form>
+  <p class="login-note">Private location dashboard</p>
+</main>
+</body>
+</html>`;
+}
+
+const loginBodyParser = express.urlencoded({ extended: false, limit: '4kb' });
+
+app.get('/login', (req, res) => {
+  const base = mountBase(req);
+  if (hasValidViewSession(req)) return res.redirect(302, `${base}/`);
+  res.set('Cache-Control', 'no-store');
+  res.type('html').send(loginPage(base, req.query.invalid === '1'));
+});
+
+app.post('/login', loginBodyParser, (req, res) => {
+  const base = mountBase(req);
+  const username = req.body?.username ?? '';
+  const password = req.body?.password ?? '';
+
+  if (!safeEqualText(username, VIEW_USER) || !safeEqualText(password, VIEW_PASSWORD)) {
+    return res.redirect(303, `${base}/login?invalid=1`);
+  }
+
+  setViewSession(req, res);
+  return res.redirect(303, `${base}/`);
+});
+
+app.post('/logout', (req, res) => {
+  const base = mountBase(req);
+  clearViewSession(req, res);
+  return res.redirect(303, `${base}/login`);
+});
 
 function requireBearer(req, res, next) {
   if (req.headers.authorization !== `Bearer ${POST_TOKEN}`) {
@@ -410,7 +591,7 @@ app.get('/apple-touch-icon.png', (req, res) => {
   res.type('png').sendFile(path.join(ASSET_DIR, 'apple-touch-icon.png'));
 });
 
-app.get('/screenshots/:name', basicAuth, (req, res) => {
+app.get('/screenshots/:name', requireImageSession, (req, res) => {
   const name = path.basename(req.params.name);
   const file = path.join(SCREENSHOT_DIR, name);
 
@@ -420,7 +601,7 @@ app.get('/screenshots/:name', basicAuth, (req, res) => {
   res.sendFile(file);
 });
 
-app.get('/api/locations', basicAuth, async (req, res) => {
+app.get('/api/locations', requireViewSession, async (req, res) => {
   res.set('Cache-Control', 'no-store');
 
   try {
@@ -455,7 +636,7 @@ app.get('/api/locations', basicAuth, async (req, res) => {
   }
 });
 
-app.get('/', basicAuth, (req, res) => {
+app.get('/', requireViewPage, (req, res) => {
   res.set('Cache-Control', 'no-store');
 
   const base = mountBase(req);
@@ -473,13 +654,15 @@ app.get('/', basicAuth, (req, res) => {
 html,body,#map{height:100%;margin:0}
 body{font-family:system-ui,sans-serif;background:#111}
 #status{position:fixed;z-index:1000;top:10px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.82);color:#fff;padding:7px 12px;border-radius:8px;font-size:13px;white-space:nowrap}
-.popup-shot{display:block;width:100%;height:auto;border-radius:6px;cursor:zoom-in;-webkit-user-select:none;user-select:none}
-.popup-meta{line-height:1.45}
-.image-carousel{width:min(280px,72vw);margin-top:8px}
-.image-carousel-track{display:flex;width:100%;overflow-x:auto;scroll-snap-type:x mandatory;scroll-behavior:smooth;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;touch-action:pan-x;scrollbar-width:none;border-radius:6px}
+#logout-form{position:fixed;z-index:1001;right:10px;bottom:max(12px,env(safe-area-inset-bottom));margin:0}
+#logout-button{border:0;border-radius:999px;background:rgba(0,0,0,.72);color:#fff;padding:8px 11px;font:600 12px system-ui;box-shadow:0 2px 9px rgba(0,0,0,.25);cursor:pointer}
+.popup-shot{display:block;width:176px;height:176px;object-fit:cover;border-radius:8px;cursor:zoom-in;-webkit-user-select:none;user-select:none}
+.popup-meta{line-height:1.4}
+.image-carousel{width:176px;margin:9px auto 0}
+.image-carousel-track{display:flex;width:176px;height:176px;overflow-x:auto;scroll-snap-type:x mandatory;scroll-behavior:smooth;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;touch-action:pan-x;scrollbar-width:none;border-radius:8px;background:#111}
 .image-carousel-track::-webkit-scrollbar{display:none}
-.image-slide{flex:0 0 100%;width:100%;scroll-snap-align:start;scroll-snap-stop:always}
-.image-slide-label{font-size:12px;font-weight:600;margin:0 0 3px 1px}
+.image-slide{position:relative;flex:0 0 176px;width:176px;height:176px;scroll-snap-align:start;scroll-snap-stop:always}
+.image-slide-label{position:absolute;z-index:2;left:7px;bottom:7px;margin:0;padding:3px 7px;border-radius:999px;background:rgba(0,0,0,.62);color:#fff;font-size:11px;font-weight:650;line-height:1.25;pointer-events:none}
 .image-dots{display:flex;justify-content:center;align-items:center;gap:6px;height:18px;padding-top:5px}
 .image-dot{width:7px;height:7px;padding:0;border:0;border-radius:50%;background:#a8a8a8;opacity:.45}
 .image-dot.active{opacity:1;background:#555}
@@ -491,6 +674,9 @@ body{font-family:system-ui,sans-serif;background:#111}
 </head>
 <body>
 <div id="status">Loading…</div>
+<form id="logout-form" method="post" action="${base}/logout">
+  <button id="logout-button" type="submit">Sign out</button>
+</form>
 <div id="map"></div>
 <div id="image-viewer" aria-hidden="true">
   <button id="image-viewer-close" type="button" aria-label="Close image">×</button>
@@ -702,7 +888,7 @@ async function refresh() {
             escapeHtml(new Date(time).toLocaleString()) +
           images +
         '</div>',
-        { maxWidth: 320 }
+        { maxWidth: 230, minWidth: 210 }
       );
 
       marker._findmeKey = pointKey;
