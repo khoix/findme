@@ -13,6 +13,7 @@ const VIEW_PASSWORD = process.env.FINDME_VIEW_PASSWORD;
 
 const DATA_DIR = path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'locations.jsonl');
+const REQUEST_LOG_FILE = path.join(DATA_DIR, 'requests.jsonl');
 const SCREENSHOT_DIR = path.join(DATA_DIR, 'screenshots');
 
 if (!POST_TOKEN || !VIEW_USER || !VIEW_PASSWORD) {
@@ -166,13 +167,17 @@ async function saveBase64Screenshot(value) {
 app.post('/findme/', requireBearer, parseIncoming, async (req, res) => {
   const body = req.body || {};
 
-  console.log('FindMe POST received', {
-    contentType: req.headers['content-type'],
+  const requestDebug = {
+    receivedAt: new Date().toISOString(),
+    contentType: req.headers['content-type'] || null,
     keys: Object.keys(body),
     screenshotPresent: Object.prototype.hasOwnProperty.call(body, 'screenshot'),
     screenshotType: typeof body.screenshot,
-    screenshotLength: typeof body.screenshot === 'string' ? body.screenshot.length : null
-  });
+    screenshotLength: typeof body.screenshot === 'string' ? body.screenshot.length : null,
+    screenshotPreview: typeof body.screenshot === 'string' ? body.screenshot.slice(0, 32) : null
+  };
+
+  fs.appendFileSync(REQUEST_LOG_FILE, JSON.stringify(requestDebug) + '\n');
 
   // Accept both the concise iOS Shortcut field names and the longer API names.
   const latitude = body.lat ?? body.latitude;
